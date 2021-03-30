@@ -3,8 +3,10 @@
 from itertools import chain
 import json
 import logging
+import numpy as np
 from timeit import default_timer as timer
 from typing import Any, Dict, List
+import sys
 
 from celery.task import task
 from celery.utils.log import get_task_logger
@@ -77,6 +79,17 @@ def serialize_config(config, simple=False) -> Dict[str, Any]:
         }
 
 
+def serialize_scoring(similarity:int):
+    cursor = connection.cursor()
+    pconn = cursor.cursor.connection
+    lobj = pconn.lobject(oid=similarity.scoring, mode='rb')
+
+    raw_data = np.frombuffer(lobj.read(), dtype=np.float32)
+    data = raw_data.reshape((len(similarity.query_objects), len(similarity.target_objects)))
+
+    return data.tolist()
+
+
 def serialize_similarity(similarity, with_scoring=False, with_objects=False) -> Dict[str, Any]:
     serialized_similarity = {
         'id': similarity.id,
@@ -87,7 +100,7 @@ def serialize_similarity(similarity, with_scoring=False, with_objects=False) -> 
         'config_id': similarity.config_id,
         'name': similarity.name,
         'status': similarity.status,
-        'scoring': similarity.scoring if with_scoring else [],
+        'scoring': serialize_scoring(similarity) if with_scoring else [],
         'query_type': similarity.query_type_id,
         'target_type': similarity.target_type_id,
         'use_alpha': similarity.use_alpha,
@@ -731,7 +744,30 @@ def compute_nblast(project_id, user_id, similarity_id, remove_target_duplicates,
                     ', '.join(str(i) for i in scoring_info['errors'])))
         else:
             similarity.status = 'complete'
-            similarity.scoring = scoring_info['similarity']
+
+            # Write the result as a Postgres large object, unless specifically
+            # asked to store relational results.
+            if relational_results:
+                pass
+            else:
+                # The large object handling needs to be explicitly in a
+                # transaction.
+                with transaction.atomic():
+                    cursor = connection.cursor()
+                    pconn = cursor.cursor.connection
+                    # Create a new large object (oid=0 in read-write mode)
+                    lobj = pconn.lobject(oid=0, mode='wb')
+
+                    # Store similarity matrix as raw data bytes in C order row
+                    # by row, little endian.
+                    arr = scoring_info['similarity']
+                    if sys.byteorder == 'big':
+                        print('swap')
+                        arr = arr.byteswap()
+                    bytes_written = lobj.write(arr.tobytes())
+
+                similarity.scoring = lobj.oid
+
             similarity.detailed_status = ("Computed scoring for {} query " +
                     "skeletons vs {} target skeletons.").format(
                             len(similarity.query_objects) if similarity.query_objects is not None else '?',
