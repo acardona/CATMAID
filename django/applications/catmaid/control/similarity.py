@@ -690,33 +690,40 @@ def get_all_object_ids(project_id, user_id, object_type, min_length=15000,
 def compute_nblast(project_id, user_id, similarity_id, remove_target_duplicates,
         simplify=True, required_branches=10, use_cache=True, use_http=False,
         min_length=15000, min_soma_length=1000, soma_tags=('soma',),
-        relational_results=False) -> str:
+        relational_results=False, max_length=float('inf'), query_object_ids=None,
+        target_object_ids=None, notify_user=True, write_scores_only=False,
+        clear_results=True) -> str:
     start_time = timer()
+    write_non_scores = not write_scores_only
     try:
         # Store status update and make this change immediately available.
         with transaction.atomic():
             similarity = NblastSimilarity.objects.select_related('config').get(
                     project_id=project_id, pk=similarity_id)
-            similarity.status = 'computing'
-            similarity.save()
+            if write_non_scores:
+                similarity.status = 'computing'
+                similarity.save()
 
-        query_object_ids = similarity.initial_query_objects
-        target_object_ids = similarity.initial_target_objects
+        if not query_object_ids:
+            query_object_ids = similarity.initial_query_objects
+        if not target_object_ids:
+            target_object_ids = similarity.initial_target_objects
 
         # Fill in object IDs, if not yet present
         updated = False
         if not query_object_ids:
             query_object_ids = get_all_object_ids(project_id, user_id,
                     similarity.query_type_id, min_length, min_soma_length,
-                    soma_tags)
+                    soma_tags, max_length=max_length)
         if not target_object_ids:
             target_object_ids = get_all_object_ids(project_id, user_id,
                     similarity.target_type_id, min_length, min_soma_length,
-                    soma_tags)
+                    soma_tags, max_length=max_length)
 
-        similarity.target_objects = target_object_ids
-        similarity.query_objects = query_object_ids
-        similarity.save()
+        if write_non_scores:
+            similarity.target_objects = target_object_ids
+            similarity.query_objects = query_object_ids
+            similarity.save()
 
         config = similarity.config
         if not config.status == 'complete':
@@ -745,21 +752,22 @@ def compute_nblast(project_id, user_id, similarity_id, remove_target_duplicates,
             raise ValueError("Errors during computation: {}".format(
                     ', '.join(str(i) for i in scoring_info['errors'])))
         else:
-            similarity.status = 'complete'
+            if write_non_scores:
+                similarity.status = 'complete'
 
-            if scoring_info['query_object_ids']:
-                invalid_query_objects = set(similarity.query_objects) - set(scoring_info['query_object_ids'])
-                similarity.invalid_query_objects = list(invalid_query_objects)
-                similarity.query_objects = scoring_info['query_object_ids']
-            else:
-                similarity.invalid_query_objects = None
+                if scoring_info['query_object_ids']:
+                    invalid_query_objects = set(similarity.query_objects) - set(scoring_info['query_object_ids'])
+                    similarity.invalid_query_objects = list(invalid_query_objects)
+                    similarity.query_objects = scoring_info['query_object_ids']
+                else:
+                    similarity.invalid_query_objects = None
 
-            if scoring_info['target_object_ids']:
-                invalid_target_objects = set(similarity.target_objects) - set(scoring_info['target_object_ids'])
-                similarity.invalid_target_objects = list(invalid_target_objects)
-                similarity.target_objects = scoring_info['target_object_ids']
-            else:
-                similarity.invalid_target_objects = None
+                if scoring_info['target_object_ids']:
+                    invalid_target_objects = set(similarity.target_objects) - set(scoring_info['target_object_ids'])
+                    similarity.invalid_target_objects = list(invalid_target_objects)
+                    similarity.target_objects = scoring_info['target_object_ids']
+                else:
+                    similarity.invalid_target_objects = None
 
             # Write the result as a Postgres large object, unless specifically
             # asked to store relational results. To query many result scores at
@@ -770,12 +778,13 @@ def compute_nblast(project_id, user_id, similarity_id, remove_target_duplicates,
                         float(scoring_info['similarity'][x[0], x[1]]))
 
                 cursor = connection.cursor()
-                logger.info('Deleting all existing results for this similarity query')
-                cursor.execute("""
-                    DELETE FROM nblast_similarity_score WHERE similarity_id = %(similarity_id)s
-                """, {
-                    'similarity_id': similarity.id
-                })
+                if clear_results:
+                    logger.info('Deleting all existing results for this similarity query')
+                    cursor.execute("""
+                        DELETE FROM nblast_similarity_score WHERE similarity_id = %(similarity_id)s
+                    """, {
+                        'similarity_id': similarity.id
+                    })
                 logger.info('Preparing to store positive NBLAST scores in result relation')
                 non_zero_idx = np.nonzero(scoring_info['similarity'])
                 # Find all non-zero matches that aren't self-matches
@@ -823,18 +832,21 @@ def compute_nblast(project_id, user_id, similarity_id, remove_target_duplicates,
 
                 similarity.scoring = lobj.oid
 
-            similarity.detailed_status = ("Computed scoring for {} query " +
-                    "skeletons vs {} target skeletons.").format(
-                            len(similarity.query_objects) if similarity.query_objects is not None else '?',
-                            len(similarity.target_objects) if similarity.target_objects is not None else '?')
-            similarity.computation_time = duration
+            if write_non_scores:
+                similarity.detailed_status = ("Computed scoring for {} query " +
+                        "skeletons vs {} target skeletons.").format(
+                                len(similarity.query_objects) if similarity.query_objects is not None else '?',
+                                len(similarity.target_objects) if similarity.target_objects is not None else '?')
+                similarity.computation_time = duration
+
             similarity.save()
 
         try:
-            msg_user(user_id, 'similarity-update', {
-                'similarity_id': similarity.id,
-                'similarity_status': similarity.status,
-            })
+            if notify_user:
+                msg_user(user_id, 'similarity-update', {
+                    'similarity_id': similarity.id,
+                    'similarity_status': similarity.status,
+                })
         except Exception as e:
             logger.error(f'Could not message user on successful NBLAST run: {e}')
 
@@ -843,16 +855,18 @@ def compute_nblast(project_id, user_id, similarity_id, remove_target_duplicates,
         duration = timer() - start_time
         similarities = NblastSimilarity.objects.filter(pk=similarity_id)
         if len(similarities) > 0:
-            similarity = similarities[0]
-            similarity.status = 'error'
-            similarity.detailed_status = str(ex)
-            similarity.computation_time = duration
-            similarity.save()
+            if write_non_scores:
+                similarity = similarities[0]
+                similarity.status = 'error'
+                similarity.detailed_status = str(ex)
+                similarity.computation_time = duration
+                similarity.save()
 
-            msg_user(user_id, 'similarity-update', {
-                'similarity_id': similarity.id,
-                'similarity_status': similarity.status,
-            })
+            if notify_user:
+                msg_user(user_id, 'similarity-update', {
+                    'similarity_id': similarity.id,
+                    'similarity_status': similarity.status,
+                })
 
         import traceback
         logger.info(traceback.format_exc())
