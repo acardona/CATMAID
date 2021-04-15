@@ -84,6 +84,8 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument('--similarity_id', dest='similarity_id', type=int, required=True,
                 help='The NBLAST similarity configuration to use, which also includes all NBLAST parameters'),
+        parser.add_argument('--min-length', dest='min_length', type=float,
+                default=None, help='An optional minimum length for skeletons looked at')
         parser.add_argument("--create-tasks", dest='create_tasks', type=str2bool, nargs='?',
                 const=True, default=False, help="Create task shell scripts")
         parser.add_argument('--n-jobs', dest='n_jobs', type=int,
@@ -120,6 +122,7 @@ class Command(BaseCommand):
         create_tasks = options['create_tasks']
         job_index = options['bin']
         remove_target_duplicates = options['remove_target_duplicates']
+        min_length = options['min_length']
 
         ssh_local_port = options['ssh_local_port']
         ssh_remote_port = options['ssh_remote_port']
@@ -150,6 +153,10 @@ class Command(BaseCommand):
                     ON skeleton.id = css.skeleton_id
             '''
 
+        extra_where = []
+        if min_length:
+            extra_where.append(f'AND cable_length > {min_length}')
+
         # Get a histogram of all skeletons in this project and collect <n_jobs>
         # buckets of equal length. In order to do this, we first find the total
         # length, divide it by <n_jobs> and form groups of skeletons so that the
@@ -160,11 +167,15 @@ class Command(BaseCommand):
             FROM catmaid_skeleton_summary css
             {extra_join}
             WHERE css.project_id = %(project_id)s
-        """.format(extra_join=extra_join), {
+            {extra_where}
+        """.format(extra_join=extra_join, extra_where='\n'.join(extra_where)), {
             'project_id': similarity.project_id,
             'skeleton_ids': skeleton_constraints,
         })
         total_length, n_skeletons = cursor.fetchone()
+        if not total_length or n_skeletons == 0:
+            raise CommandError('No skeletons found for query')
+
         length_per_task = math.ceil(total_length / n_jobs)
 
         logger.info(f'Targeting a cable length of {length_per_task} nm per '
@@ -178,10 +189,11 @@ class Command(BaseCommand):
                     FROM catmaid_skeleton_summary css
                     {extra_join}
                     WHERE project_id = %(project_id)s
+                    {extra_where}
                 ) sub
             ) sub2
             GROUP BY grp;
-        """.format(extra_join=extra_join), {
+        """.format(extra_join=extra_join, extra_where='\n'.join(extra_where)), {
             'project_id': similarity.project_id,
             'group_length': length_per_task,
             'skeleton_ids': skeleton_constraints,
@@ -193,6 +205,8 @@ class Command(BaseCommand):
         if create_tasks:
             logger.info(f'Generating {len(skeleton_groups)} jobs with a cumulative '
                     f'cable length with an average of {int(avg_skeleton_count)} skeletons per group')
+        if min_length:
+            logger.info(f'Minimum skeleton length: {min_length}')
 
             pre, post = [], []
             if conda_env:
