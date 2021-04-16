@@ -70,12 +70,13 @@ SIMILARITY_ID={similarity_id}
 BIN_IDX={bin}
 MIN_LENGTH={min_length}
 INITIAL_WORKING_DIR="{working_dir}"
+N_JOBS={n_jobs}
 
 {pre_matter}
 
 # Do work
 cd "$INITIAL_WORKING_DIR"
-python manage.py catmaid_parallel_nblast --similarity-id $SIMILARITY_ID --min-length $MIN_LENGTH --compute-bin $BIN_IDX
+python manage.py catmaid_parallel_nblast --similarity-id $SIMILARITY_ID --n-jobs $N_JOBS --min-length $MIN_LENGTH - --compute-bin $BIN_IDX
 
 {post_matter}
 
@@ -91,10 +92,10 @@ class Command(BaseCommand):
                 help='The NBLAST similarity configuration to use, which also includes all NBLAST parameters'),
         parser.add_argument('--min-length', dest='min_length', type=float,
                 default=None, help='An optional minimum length for skeletons looked at')
-        parser.add_argument("--create-tasks", dest='create_tasks', type=str2bool, nargs='?',
-                const=True, default=False, help="Create task shell scripts")
         parser.add_argument('--n-jobs', dest='n_jobs', type=int,
                 default=50, help='How many jobs should be created.'),
+        parser.add_argument("--create-tasks", dest='create_tasks', type=str2bool, nargs='?',
+                const=True, default=False, help="Create task shell scripts")
         parser.add_argument('--target-dir', dest='target_dir', type=str,
                 default='nblast_jobs', help='Where to create the NBLAST jobss'),
         parser.add_argument('--prefix', dest='prefix', type=str,
@@ -240,6 +241,7 @@ class Command(BaseCommand):
                     'working_dir': working_dir,
                     'similarity_id': similarity.id,
                     'bin': n,
+                    'n_jobs': n_jobs,
                     'min_length': min_length,
                     'pre_matter': '\n'.join(pre),
                     'post_matter': '\n'.join(post),
