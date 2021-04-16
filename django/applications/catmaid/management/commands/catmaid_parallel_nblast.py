@@ -68,13 +68,18 @@ job_template = """
 
 SIMILARITY_ID={similarity_id}
 BIN_IDX={bin}
+MIN_LENGTH={min_length}
+INITIAL_WORKING_DIR="{working_dir}"
 
 {pre_matter}
 
 # Do work
-manage.py catmaid_parallel_nblast --similarity-id $SIMILARITY_ID --compute-bin $BIN_IDX
+cd "$INITIAL_WORKING_DIR"
+python manage.py catmaid_parallel_nblast --similarity-id $SIMILARITY_ID --min-length $MIN_LENGTH --compute-bin $BIN_IDX
 
 {post_matter}
+
+cd "$INITIAL_WORKING_DIR"
 """
 
 
@@ -82,7 +87,7 @@ class Command(BaseCommand):
     help = "Create a set of separate shell scripts to run independently on a cluster"
 
     def add_arguments(self, parser):
-        parser.add_argument('--similarity_id', dest='similarity_id', type=int, required=True,
+        parser.add_argument('--similarity-id', dest='similarity_id', type=int, required=True,
                 help='The NBLAST similarity configuration to use, which also includes all NBLAST parameters'),
         parser.add_argument('--min-length', dest='min_length', type=float,
                 default=None, help='An optional minimum length for skeletons looked at')
@@ -112,6 +117,8 @@ class Command(BaseCommand):
                 help="A conda environment to load in tasks")
         parser.add_argument("--venv", dest='venv', default=None,
                 help="A venv environment to load in tasks")
+        parser.add_argument("--working-dir", dest='working_dir', default='$(pwd)',
+                help="An optional working directory")
 
     def handle(self, *args, **options):
         similarity = NblastSimilarity.objects.get(pk=options['similarity_id'])
@@ -122,7 +129,8 @@ class Command(BaseCommand):
         create_tasks = options['create_tasks']
         job_index = options['bin']
         remove_target_duplicates = options['remove_target_duplicates']
-        min_length = options['min_length']
+        min_length = options['min_length'] or 0
+        working_dir = options['working_dir']
 
         ssh_local_port = options['ssh_local_port']
         ssh_remote_port = options['ssh_remote_port']
@@ -229,8 +237,10 @@ class Command(BaseCommand):
 
             for n, sg in enumerate(skeleton_groups):
                 job_sh = job_template.format(**{
+                    'working_dir': working_dir,
                     'similarity_id': similarity.id,
                     'bin': n,
+                    'min_length': min_length,
                     'pre_matter': '\n'.join(pre),
                     'post_matter': '\n'.join(post),
                 })
