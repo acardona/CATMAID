@@ -76,7 +76,7 @@ N_JOBS={n_jobs}
 
 # Do work
 cd "$INITIAL_WORKING_DIR"
-python manage.py catmaid_parallel_nblast --similarity-id $SIMILARITY_ID --n-jobs $N_JOBS --min-length $MIN_LENGTH - --compute-bin $BIN_IDX
+python manage.py catmaid_parallel_nblast --similarity-id $SIMILARITY_ID --n-jobs $N_JOBS --min-length $MIN_LENGTH --compute-bin $BIN_IDX
 
 {post_matter}
 
