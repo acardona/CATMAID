@@ -209,12 +209,12 @@ class Command(BaseCommand):
         skeleton_groups = list([r[0] for r in cursor.fetchall()])
         avg_skeleton_count = np.mean([len(l) for l in skeleton_groups])
 
+        if min_length:
+            logger.info(f'Minimum skeleton length: {min_length}')
 
         if create_tasks:
             logger.info(f'Generating {len(skeleton_groups)} jobs with a cumulative '
                     f'cable length with an average of {int(avg_skeleton_count)} skeletons per group')
-        if min_length:
-            logger.info(f'Minimum skeleton length: {min_length}')
 
             pre, post = [], []
             if conda_env:
