@@ -643,8 +643,11 @@ def compute_nblast_config(config_id, user_id, use_cache=True) -> str:
 
 
 def get_all_object_ids(project_id, user_id, object_type, min_length=15000,
-        min_soma_length=1000, soma_tags=('soma'), limit=None, max_length=None) -> List:
-    """Return all IDs of objects that fit the query parameters.
+        min_soma_length=1000, soma_tags=('soma'), limit=None, max_length=None,
+        bb=None) -> List:
+    """Return all IDs of objects that fit the query parameters. A bounding box
+    can optionally be provided with a dictionary having the keys minx, miny,
+    minz, maxx, maxy, maxz.
     """
     cursor = connection.cursor()
 
@@ -667,13 +670,61 @@ def get_all_object_ids(project_id, user_id, object_type, min_length=15000,
             """)
             params['max_length'] = max_length
 
+        if bb:
+            # If a bounding box is provided, drop all skeletons that don't
+            # intersect
+            extra_join = """
+                JOIN (
+                    WITH bb AS (
+                      SELECT %(minx)s as minx, %(miny)s as miny, %(minz)s as minz,
+                      %(maxx)s as maxx, %(maxy)s as maxy, %(maxz)s as maxz,
+                      %(project_id)s as project_id
+                    ),
+                    req AS (
+                      SELECT bb.*, (bb.maxz + bb.minz) / 2.0 as halfz,
+                        (bb.maxz - bb.minz) / 2.0 as halfzdiff
+                      FROM bb
+                    ),
+                    skeleton_in_bb AS (
+                      SELECT DISTINCT t.skeleton_id AS id
+                      FROM req, treenode_edge te
+                      JOIN treenode t
+                        ON t.id = te.id
+                      WHERE te.edge &&& ST_MakeLine(ARRAY[
+                        ST_MakePoint(req.minx, req.maxy, req.maxz),
+                        ST_MakePoint(req.maxx, req.miny, req.minz)] ::geometry[])
+                      AND ST_3DDWithin(te.edge, ST_MakePolygon(ST_MakeLine(ARRAY[
+                        ST_MakePoint(req.minx, req.miny, req.halfz),
+                        ST_MakePoint(req.maxx, req.miny, req.halfz),
+                        ST_MakePoint(req.maxx, req.maxy, req.halfz),
+                        ST_MakePoint(req.minx, req.maxy, req.halfz),
+                        ST_MakePoint(req.minx, req.miny, req.halfz)]::geometry[])),
+                        req.halfzdiff)
+                      AND te.project_id = req.project_id
+                    )
+                    SELECT id
+                    FROM skeleton_in_bb
+                ) skeleton_in_bb(id)
+                ON skeleton_in_bb.id = css.skeleton_id
+            """
+            params['minx'] = bb['minx']
+            params['miny'] = bb['miny']
+            params['minz'] = bb['minz']
+            params['maxx'] = bb['maxx']
+            params['maxy'] = bb['maxy']
+            params['maxz'] = bb['maxz']
+        else:
+            extra_join = ''
+
         cursor.execute("""
             SELECT skeleton_id
             FROM catmaid_skeleton_summary css
-            WHERE project_id = %(project_id)s
+            {extra_join}
+            WHERE css.project_id = %(project_id)s
             {extra_where}
             {limit}
         """.format(**{
+            'extra_join': extra_join,
             'extra_where': ' AND '.join([''] + extra_where) if extra_where else '',
             'limit': 'LIMIT %(limit)s' if limit is not None else '',
         }), params)
@@ -692,7 +743,7 @@ def compute_nblast(project_id, user_id, similarity_id, remove_target_duplicates,
         min_length=15000, min_soma_length=1000, soma_tags=('soma',),
         relational_results=False, max_length=float('inf'), query_object_ids=None,
         target_object_ids=None, notify_user=True, write_scores_only=False,
-        clear_results=True) -> str:
+        clear_results=True, force_objects=False, bb=None) -> str:
     start_time = timer()
     write_non_scores = not write_scores_only
     try:
@@ -704,21 +755,31 @@ def compute_nblast(project_id, user_id, similarity_id, remove_target_duplicates,
                 similarity.status = 'computing'
                 similarity.save()
 
-        if not query_object_ids:
+        if not query_object_ids and not force_objects:
             query_object_ids = similarity.initial_query_objects
-        if not target_object_ids:
+        if not target_object_ids and not force_objects:
             target_object_ids = similarity.initial_target_objects
 
         # Fill in object IDs, if not yet present
         updated = False
         if not query_object_ids:
+            logger.info('Getting query object IDs')
             query_object_ids = get_all_object_ids(project_id, user_id,
                     similarity.query_type_id, min_length, min_soma_length,
-                    soma_tags, max_length=max_length)
+                    soma_tags, max_length=max_length, bb=bb)
+            logger.info(f'Fetched {len(query_object_ids)} query object IDs of type '
+                    f'{similarity.target_type_id} with min length {min_length}, min '
+                    f'length if soma found {min_soma_length}, soma tags {soma_tags}, '
+                    f'max length {max_length}, and the bounding box {bb}')
         if not target_object_ids:
+            logger.info('Getting target object IDs')
             target_object_ids = get_all_object_ids(project_id, user_id,
                     similarity.target_type_id, min_length, min_soma_length,
-                    soma_tags, max_length=max_length)
+                    soma_tags, max_length=max_length, bb=bb)
+            logger.info(f'Fetched {len(target_object_ids)} target object IDs of type '
+                    f'{similarity.target_type_id} with min length {min_length}, min '
+                    f'length if soma found {min_soma_length}, soma tags {soma_tags}, '
+                    f'max length {max_length}, and the bounding box {bb}')
 
         if write_non_scores:
             similarity.target_objects = target_object_ids
@@ -743,7 +804,7 @@ def compute_nblast(project_id, user_id, similarity_id, remove_target_duplicates,
                 remove_target_duplicates=remove_target_duplicates,
                 simplify=simplify, required_branches=required_branches,
                 use_cache=use_cache, reverse=similarity.reverse,
-                top_n=similarity.top_n, use_http=use_http)
+                top_n=similarity.top_n, use_http=use_http, bb=bb)
 
         duration = timer() - start_time
 
